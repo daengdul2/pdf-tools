@@ -401,6 +401,7 @@ const TOOLS = [
   { id:'pdf2img',  icon:'📸', label:'PDF ke Gambar',   desc:'Ekspor setiap halaman sebagai PNG',        color:'c-purple' },
   { id:'compress', icon:'🗜️', label:'Kompres PDF',    desc:'Kurangi ukuran file PDF',                  color:'c-red' },
   { id:'protect',  icon:'🔒', label:'Lindungi PDF',    desc:'Tambahkan password pada PDF',              color:'c-gold' },
+  { id:'unlock',   icon:'🔓', label:'Buka Kunci PDF',  desc:'Hapus password dari PDF yang terkunci',    color:'c-teal' },
   { id:'watermark',icon:'💧', label:'Watermark',       desc:'Tambahkan teks watermark ke PDF',         color:'c-blue' },
   { id:'info',     icon:'ℹ️', label:'Info PDF',        desc:'Lihat metadata dan detail file PDF',       color:'c-pink' },
 ];
@@ -462,14 +463,11 @@ function fmtSize(bytes) {
 function readFileBytes(file) {
   return new Promise((res,rej)=>{
     const fr = new FileReader();
-    // Return ArrayBuffer — always create fresh Uint8Array from it
-    // to prevent buffer transfer/detach bugs with PDF.js
     fr.onload = e => res(e.target.result);
     fr.onerror = rej;
     fr.readAsArrayBuffer(file);
   });
 }
-// Always get a fresh Uint8Array copy — safe for both pdf-lib and PDF.js
 function toU8(buf) { return new Uint8Array(buf instanceof ArrayBuffer ? buf.slice(0) : buf); }
 function downloadBytes(bytes, name) {
   const blob = new Blob([bytes], {type:'application/pdf'});
@@ -567,6 +565,7 @@ function openTool(t) {
     case 'pdf2img':  toolPdf2Img(); break;
     case 'compress': toolCompress(); break;
     case 'protect':  toolProtect(); break;
+    case 'unlock':   toolUnlock(); break;
     case 'watermark':toolWatermark(); break;
     case 'info':     toolInfo(); break;
   }
@@ -651,6 +650,7 @@ function toolSplit() {
       pg.show('Memuat PDF...',10);
       const bytes = await readFileBytes(file);
       const doc = await PDFLib.PDFDocument.load(toU8(bytes), {ignoreEncryption:true});
+      const total = doc.getPageCount();
 
       let groups = [];
       if(mode==='each') {
@@ -900,16 +900,14 @@ async function toolReorder() {
     </div>
     <button class="btn btn-primary" id="btnReorder" disabled>↕️ Simpan Urutan Baru</button>
   `);
-  let pageOrder=[], loadedBytes=null, loadedFile=null;
+  let pageOrder=[], loadedFile=null;
   const dz = setupDropzone('reorder','application/pdf',false, async files=>{
     if(!files.length) return;
     const area=document.getElementById('reorderArea');
     area.innerHTML='<p style="color:var(--muted);font-size:.85rem">Memuat pratinjau...</p>';
     try {
-      loadedFile=files[0]; // store File object for re-reading on save
+      loadedFile=files[0];
       const bytes=await readFileBytes(files[0]);
-      loadedBytes=bytes;
-      // PENTING: beri salinan baru ke PDF.js agar tidak men-transfer buffer
       const pdfjsDoc=await pdfjsLib.getDocument({data: toU8(bytes)}).promise;
       const total=pdfjsDoc.numPages;
       pageOrder=Array.from({length:total},(_,i)=>i);
@@ -920,7 +918,7 @@ async function toolReorder() {
       await renderThumbs('tg_reorder', pdfjsDoc, total, [], ()=>{});
       makeReorderDraggable();
       document.getElementById('btnReorder').disabled=false;
-    } catch(e){ area.innerHTML='<p style="color:var(--accent)">Gagal memuat PDF: '+e.message+'</p>'; }
+    } catch(e){ area.innerHTML='<p style="color:var(--accent)">Gagal memuat PDF</p>'; }
   });
 
   function makeReorderDraggable() {
@@ -941,7 +939,7 @@ async function toolReorder() {
         const fromIdx=allItems.indexOf(dragged);
         const toIdx=allItems.indexOf(item);
         if(fromIdx<toIdx) item.after(dragged); else item.before(dragged);
-        // rebuild pageOrder dari urutan DOM saat ini
+        // rebuild pageOrder
         const newOrder=[...grid.querySelectorAll('.thumb-item')].map(el=>parseInt(el.dataset.idx));
         pageOrder=newOrder;
       });
@@ -953,9 +951,7 @@ async function toolReorder() {
     const pg=progressUI('reorder'); const btn=document.getElementById('btnReorder'); btn.disabled=true;
     pg.show('Menyusun ulang...',20);
     try {
-      // Baca ulang file dari sumber asli untuk memastikan bytes segar dan valid
-      const freshBytes = await readFileBytes(loadedFile);
-      pg.update(40,'Memuat PDF...');
+      const freshBytes=await readFileBytes(loadedFile);
       const doc=await PDFLib.PDFDocument.load(toU8(freshBytes), {ignoreEncryption:true});
       const newDoc=await PDFLib.PDFDocument.create();
       const copied=await newDoc.copyPages(doc,pageOrder);
@@ -1167,6 +1163,7 @@ function toolCompress() {
     try {
       const bytes=await readFileBytes(file);
       const doc=await PDFLib.PDFDocument.load(toU8(bytes),{ignoreEncryption:true});
+      pg.update(60,'Mengoptimalkan...');
       const useObjectStreams=level!=='low';
       const out=await doc.save({useObjectStreams, addDefaultPage:false, objectsPerTick: level==='high'?10:50});
       pg.update(100,'Selesai!');
@@ -1216,6 +1213,7 @@ function toolProtect() {
     try {
       const bytes=await readFileBytes(file);
       const doc=await PDFLib.PDFDocument.load(toU8(bytes), {ignoreEncryption:true});
+      pg.update(70,'Menyimpan...');
       // pdf-lib doesn't support encryption natively; we note this
       const out=await doc.save();
       pg.update(100,'Selesai!');
@@ -1226,7 +1224,177 @@ function toolProtect() {
   });
 }
 
-// ── 11. WATERMARK ─────────────────────────────────────────────────
+// ── 11. UNLOCK ────────────────────────────────────────────────────
+function toolUnlock() {
+  openModal('🔓 Buka Kunci PDF', `
+    ${buildDropzone('unlock','application/pdf',false,'Pilih file PDF yang terkunci')}
+    <div class="ctrl-row">
+      <div class="ctrl-group">
+        <label>Password PDF</label>
+        <div style="position:relative">
+          <input type="password" id="unlockPass" placeholder="Masukkan password PDF..." style="width:100%;padding-right:3rem">
+          <button id="togglePassVis" onclick="(function(){const i=document.getElementById('unlockPass');const b=document.getElementById('togglePassVis');if(i.type==='password'){i.type='text';b.textContent='🙈';}else{i.type='password';b.textContent='👁️';}})();return false"
+            style="position:absolute;right:.6rem;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:1rem;color:var(--muted)">👁️</button>
+        </div>
+      </div>
+    </div>
+    <div id="unlockStatus" style="display:none;padding:.75rem 1rem;border-radius:10px;font-size:.85rem;margin-bottom:1rem"></div>
+    <div class="progress-wrap" id="prog_unlock">
+      <div class="progress-bar-bg"><div class="progress-bar-fill" id="progbar_unlock"></div></div>
+      <div class="progress-text" id="progtxt_unlock"></div>
+    </div>
+    <div style="display:flex;gap:.75rem;flex-wrap:wrap">
+      <button class="btn btn-primary" id="btnUnlock" disabled>🔓 Buka & Simpan PDF</button>
+      <button class="btn btn-secondary" id="btnUnlockAuto" disabled>🔍 Coba Tanpa Password</button>
+    </div>
+    <p style="font-size:.75rem;color:var(--muted);margin-top:1rem;line-height:1.5">
+      ⚠️ Fitur ini hanya berfungsi jika Anda memiliki password yang sah atau PDF hanya dilindungi dari pengeditan (bukan pembukaan). 
+      Tidak dapat membobol enkripsi PDF tanpa password.
+    </p>
+  `);
+
+  let loadedFile = null;
+
+  const dz = setupDropzone('unlock', 'application/pdf', false, async files => {
+    if (!files.length) return;
+    loadedFile = files[0];
+    // Cek apakah PDF ini terenkripsi
+    const status = document.getElementById('unlockStatus');
+    status.style.display = 'none';
+    document.getElementById('btnUnlock').disabled = false;
+    document.getElementById('btnUnlockAuto').disabled = false;
+    try {
+      const bytes = await readFileBytes(files[0]);
+      // Coba buka tanpa password dulu
+      const testDoc = await PDFLib.PDFDocument.load(toU8(bytes), { ignoreEncryption: false });
+      // Jika berhasil → tidak terenkripsi
+      status.style.display = 'block';
+      status.style.background = 'rgba(0,212,170,.1)';
+      status.style.border = '1px solid rgba(0,212,170,.3)';
+      status.style.color = 'var(--success)';
+      status.innerHTML = '✅ PDF ini <strong>tidak terkunci</strong> — tetap bisa disimpan ulang tanpa enkripsi.';
+    } catch (e) {
+      if (e.message && e.message.includes('password')) {
+        status.style.display = 'block';
+        status.style.background = 'rgba(255,95,63,.1)';
+        status.style.border = '1px solid rgba(255,95,63,.3)';
+        status.style.color = 'var(--accent)';
+        status.innerHTML = '🔒 PDF ini <strong>terkunci dengan password</strong>. Masukkan password di atas untuk membukanya.';
+      } else {
+        status.style.display = 'block';
+        status.style.background = 'rgba(255,184,77,.1)';
+        status.style.border = '1px solid rgba(255,184,77,.3)';
+        status.style.color = 'var(--warning)';
+        status.innerHTML = '⚠️ Tidak dapat memeriksa status enkripsi: ' + e.message;
+      }
+    }
+  });
+
+  // Coba buka tanpa password (hanya-baca protection / print-only lock)
+  document.getElementById('btnUnlockAuto').addEventListener('click', async () => {
+    if (!loadedFile) return;
+    const pg = progressUI('unlock');
+    const btn = document.getElementById('btnUnlockAuto');
+    btn.disabled = true;
+    pg.show('Mencoba membuka tanpa password...', 20);
+    try {
+      const bytes = await readFileBytes(loadedFile);
+      pg.update(40, 'Memuat PDF...');
+      const doc = await PDFLib.PDFDocument.load(toU8(bytes), { ignoreEncryption: true });
+      pg.update(75, 'Membuat salinan bersih...');
+      const newDoc = await PDFLib.PDFDocument.create();
+      const pages = await newDoc.copyPages(doc, doc.getPageIndices());
+      pages.forEach(p => newDoc.addPage(p));
+      pg.update(92, 'Menyimpan...');
+      const out = await newDoc.save();
+      pg.update(100, 'Selesai!');
+      downloadBytes(out, 'terbuka_' + loadedFile.name);
+      showToast('PDF berhasil dibuka dan disimpan!');
+      updateUnlockStatus('✅ Berhasil! PDF disimpan tanpa proteksi.');
+    } catch (e) {
+      showToast('Gagal: ' + e.message, 'error');
+      updateUnlockStatus('❌ Gagal membuka PDF. PDF ini mungkin memerlukan password.', 'error');
+    }
+    pg.hide();
+    btn.disabled = false;
+  });
+
+  // Buka dengan password
+  document.getElementById('btnUnlock').addEventListener('click', async () => {
+    if (!loadedFile) return;
+    const password = document.getElementById('unlockPass').value;
+    const pg = progressUI('unlock');
+    const btn = document.getElementById('btnUnlock');
+    btn.disabled = true;
+    pg.show('Membuka kunci PDF...', 15);
+    try {
+      const bytes = await readFileBytes(loadedFile);
+      pg.update(35, 'Memverifikasi password...');
+
+      let doc;
+      try {
+        // Coba dengan password yang diberikan
+        doc = await PDFLib.PDFDocument.load(toU8(bytes), {
+          password: password || undefined,
+          ignoreEncryption: password ? false : true,
+        });
+      } catch (e) {
+        if (e.message && (e.message.includes('password') || e.message.includes('encrypt'))) {
+          throw new Error('Password salah atau PDF menggunakan enkripsi yang tidak didukung');
+        }
+        throw e;
+      }
+
+      pg.update(65, 'Membuat salinan tanpa proteksi...');
+      // Buat dokumen baru tanpa enkripsi
+      const newDoc = await PDFLib.PDFDocument.create();
+      const allPageIndices = doc.getPageIndices();
+      const pages = await newDoc.copyPages(doc, allPageIndices);
+      pages.forEach(p => newDoc.addPage(p));
+
+      // Salin metadata
+      try {
+        newDoc.setTitle(doc.getTitle() || '');
+        newDoc.setAuthor(doc.getAuthor() || '');
+        newDoc.setCreator(doc.getCreator() || '');
+      } catch (_) {}
+
+      pg.update(90, 'Menyimpan PDF bersih...');
+      const out = await newDoc.save();
+      pg.update(100, 'Selesai!');
+      downloadBytes(out, 'terbuka_' + loadedFile.name);
+      showToast('PDF berhasil dibuka kuncinya!');
+      updateUnlockStatus('✅ Berhasil! PDF disimpan tanpa password (' + allPageIndices.length + ' halaman).');
+    } catch (e) {
+      showToast('Gagal: ' + e.message, 'error');
+      updateUnlockStatus('❌ ' + e.message, 'error');
+    }
+    pg.hide();
+    btn.disabled = false;
+  });
+
+  // Enter key pada input password → langsung unlock
+  document.getElementById('unlockPass').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('btnUnlock').click();
+  });
+
+  function updateUnlockStatus(msg, type = 'success') {
+    const el = document.getElementById('unlockStatus');
+    el.style.display = 'block';
+    if (type === 'error') {
+      el.style.background = 'rgba(255,95,63,.1)';
+      el.style.border = '1px solid rgba(255,95,63,.3)';
+      el.style.color = 'var(--accent)';
+    } else {
+      el.style.background = 'rgba(0,212,170,.1)';
+      el.style.border = '1px solid rgba(0,212,170,.3)';
+      el.style.color = 'var(--success)';
+    }
+    el.innerHTML = msg;
+  }
+}
+
+// ── 12. WATERMARK ─────────────────────────────────────────────────
 function toolWatermark() {
   openModal('💧 Watermark PDF', `
     ${buildDropzone('wm','application/pdf',false,'Pilih satu file PDF')}
@@ -1271,6 +1439,7 @@ function toolWatermark() {
     try {
       const bytes=await readFileBytes(file);
       const doc=await PDFLib.PDFDocument.load(toU8(bytes), {ignoreEncryption:true});
+      const font=await doc.embedFont(PDFLib.StandardFonts.HelveticaBold);
       const pages=doc.getPages();
       pages.forEach((page,i)=>{
         pg.update(20+Math.round(((i+1)/pages.length)*70), `Halaman ${i+1}/${pages.length}...`);
@@ -1294,7 +1463,7 @@ function toolWatermark() {
   });
 }
 
-// ── 12. INFO ──────────────────────────────────────────────────────
+// ── 13. INFO ──────────────────────────────────────────────────────
 function toolInfo() {
   openModal('ℹ️ Info PDF', `
     ${buildDropzone('info','application/pdf',false,'Pilih satu file PDF')}
