@@ -462,11 +462,15 @@ function fmtSize(bytes) {
 function readFileBytes(file) {
   return new Promise((res,rej)=>{
     const fr = new FileReader();
-    fr.onload = e => res(new Uint8Array(e.target.result));
+    // Return ArrayBuffer — always create fresh Uint8Array from it
+    // to prevent buffer transfer/detach bugs with PDF.js
+    fr.onload = e => res(e.target.result);
     fr.onerror = rej;
     fr.readAsArrayBuffer(file);
   });
 }
+// Always get a fresh Uint8Array copy — safe for both pdf-lib and PDF.js
+function toU8(buf) { return new Uint8Array(buf instanceof ArrayBuffer ? buf.slice(0) : buf); }
 function downloadBytes(bytes, name) {
   const blob = new Blob([bytes], {type:'application/pdf'});
   const url = URL.createObjectURL(blob);
@@ -593,7 +597,7 @@ function toolMerge() {
       for(let i=0;i<files.length;i++){
         pg.update(10+Math.round((i/files.length)*80), `Memproses: ${files[i].name}`);
         const bytes = await readFileBytes(files[i]);
-        const doc = await PDFLib.PDFDocument.load(bytes);
+        const doc = await PDFLib.PDFDocument.load(toU8(bytes), {ignoreEncryption:true});
         const copied = await merged.copyPages(doc, doc.getPageIndices());
         copied.forEach(p=>merged.addPage(p));
       }
@@ -646,8 +650,7 @@ function toolSplit() {
     try {
       pg.show('Memuat PDF...',10);
       const bytes = await readFileBytes(file);
-      const doc = await PDFLib.PDFDocument.load(bytes);
-      const total = doc.getPageCount();
+      const doc = await PDFLib.PDFDocument.load(toU8(bytes), {ignoreEncryption:true});
 
       let groups = [];
       if(mode==='each') {
@@ -706,7 +709,7 @@ async function toolExtract() {
     try {
       const bytes = await readFileBytes(files[0]);
       loadedDoc = bytes;
-      const pdfjsDoc = await pdfjsLib.getDocument(bytes).promise;
+      const pdfjsDoc = await pdfjsLib.getDocument({data: toU8(bytes)}).promise;
       totalPages = pdfjsDoc.numPages;
       selPages=[];
       area.innerHTML=`
@@ -740,7 +743,7 @@ async function toolExtract() {
     btn.disabled=true;
     pg.show('Mengekstrak...',20);
     try {
-      const doc = await PDFLib.PDFDocument.load(loadedDoc);
+      const doc = await PDFLib.PDFDocument.load(toU8(loadedDoc), {ignoreEncryption:true});
       const newDoc = await PDFLib.PDFDocument.create();
       const sorted = [...selPages].sort((a,b)=>a-b);
       const copied = await newDoc.copyPages(doc, sorted);
@@ -773,7 +776,7 @@ async function toolRemove() {
     try {
       const bytes = await readFileBytes(files[0]);
       loadedDoc = bytes;
-      const pdfjsDoc = await pdfjsLib.getDocument(bytes).promise;
+      const pdfjsDoc = await pdfjsLib.getDocument({data: toU8(bytes)}).promise;
       totalPages = pdfjsDoc.numPages;
       selPages=[];
       area.innerHTML=`
@@ -797,7 +800,7 @@ async function toolRemove() {
     btn.disabled=true;
     pg.show('Menghapus halaman...',20);
     try {
-      const doc = await PDFLib.PDFDocument.load(loadedDoc);
+      const doc = await PDFLib.PDFDocument.load(toU8(loadedDoc), {ignoreEncryption:true});
       const keep = Array.from({length:totalPages},(_,i)=>i).filter(i=>!selPages.includes(i));
       const newDoc = await PDFLib.PDFDocument.create();
       const copied = await newDoc.copyPages(doc, keep);
@@ -859,7 +862,7 @@ async function toolRotate() {
     pg.show('Memutar halaman...',20);
     try {
       const bytes=await readFileBytes(file);
-      const doc=await PDFLib.PDFDocument.load(bytes);
+      const doc=await PDFLib.PDFDocument.load(toU8(bytes), {ignoreEncryption:true});
       const total=doc.getPageCount();
       let indices=[];
       if(target==='all') indices=Array.from({length:total},(_,i)=>i);
@@ -897,15 +900,17 @@ async function toolReorder() {
     </div>
     <button class="btn btn-primary" id="btnReorder" disabled>↕️ Simpan Urutan Baru</button>
   `);
-  let pageOrder=[], loadedBytes=null;
+  let pageOrder=[], loadedBytes=null, loadedFile=null;
   const dz = setupDropzone('reorder','application/pdf',false, async files=>{
     if(!files.length) return;
     const area=document.getElementById('reorderArea');
     area.innerHTML='<p style="color:var(--muted);font-size:.85rem">Memuat pratinjau...</p>';
     try {
+      loadedFile=files[0]; // store File object for re-reading on save
       const bytes=await readFileBytes(files[0]);
       loadedBytes=bytes;
-      const pdfjsDoc=await pdfjsLib.getDocument(bytes).promise;
+      // PENTING: beri salinan baru ke PDF.js agar tidak men-transfer buffer
+      const pdfjsDoc=await pdfjsLib.getDocument({data: toU8(bytes)}).promise;
       const total=pdfjsDoc.numPages;
       pageOrder=Array.from({length:total},(_,i)=>i);
       area.innerHTML=`
@@ -915,7 +920,7 @@ async function toolReorder() {
       await renderThumbs('tg_reorder', pdfjsDoc, total, [], ()=>{});
       makeReorderDraggable();
       document.getElementById('btnReorder').disabled=false;
-    } catch(e){ area.innerHTML='<p style="color:var(--accent)">Gagal memuat PDF</p>'; }
+    } catch(e){ area.innerHTML='<p style="color:var(--accent)">Gagal memuat PDF: '+e.message+'</p>'; }
   });
 
   function makeReorderDraggable() {
@@ -936,7 +941,7 @@ async function toolReorder() {
         const fromIdx=allItems.indexOf(dragged);
         const toIdx=allItems.indexOf(item);
         if(fromIdx<toIdx) item.after(dragged); else item.before(dragged);
-        // rebuild pageOrder
+        // rebuild pageOrder dari urutan DOM saat ini
         const newOrder=[...grid.querySelectorAll('.thumb-item')].map(el=>parseInt(el.dataset.idx));
         pageOrder=newOrder;
       });
@@ -944,11 +949,14 @@ async function toolReorder() {
   }
 
   document.getElementById('btnReorder').addEventListener('click', async()=>{
-    if(!loadedBytes) return;
+    if(!loadedFile) return;
     const pg=progressUI('reorder'); const btn=document.getElementById('btnReorder'); btn.disabled=true;
-    pg.show('Menyusun ulang...',30);
+    pg.show('Menyusun ulang...',20);
     try {
-      const doc=await PDFLib.PDFDocument.load(loadedBytes);
+      // Baca ulang file dari sumber asli untuk memastikan bytes segar dan valid
+      const freshBytes = await readFileBytes(loadedFile);
+      pg.update(40,'Memuat PDF...');
+      const doc=await PDFLib.PDFDocument.load(toU8(freshBytes), {ignoreEncryption:true});
       const newDoc=await PDFLib.PDFDocument.create();
       const copied=await newDoc.copyPages(doc,pageOrder);
       copied.forEach(p=>newDoc.addPage(p));
@@ -1101,7 +1109,7 @@ function toolPdf2Img() {
     pg.show('Memuat PDF...',5);
     try {
       const bytes=await readFileBytes(file);
-      const pdfjsDoc=await pdfjsLib.getDocument(bytes).promise;
+      const pdfjsDoc=await pdfjsLib.getDocument({data: toU8(bytes)}).promise;
       const total=pdfjsDoc.numPages;
       for(let i=1;i<=total;i++){
         pg.update(Math.round((i/total)*95), `Halaman ${i}/${total}...`);
@@ -1158,8 +1166,7 @@ function toolCompress() {
     pg.show('Mengompresi...',20);
     try {
       const bytes=await readFileBytes(file);
-      const doc=await PDFLib.PDFDocument.load(bytes,{ignoreEncryption:true});
-      pg.update(60,'Mengoptimalkan...');
+      const doc=await PDFLib.PDFDocument.load(toU8(bytes),{ignoreEncryption:true});
       const useObjectStreams=level!=='low';
       const out=await doc.save({useObjectStreams, addDefaultPage:false, objectsPerTick: level==='high'?10:50});
       pg.update(100,'Selesai!');
@@ -1208,8 +1215,7 @@ function toolProtect() {
     pg.show('Mengenkripsi...',30);
     try {
       const bytes=await readFileBytes(file);
-      const doc=await PDFLib.PDFDocument.load(bytes);
-      pg.update(70,'Menyimpan...');
+      const doc=await PDFLib.PDFDocument.load(toU8(bytes), {ignoreEncryption:true});
       // pdf-lib doesn't support encryption natively; we note this
       const out=await doc.save();
       pg.update(100,'Selesai!');
@@ -1264,8 +1270,7 @@ function toolWatermark() {
     pg.show('Menambahkan watermark...',20);
     try {
       const bytes=await readFileBytes(file);
-      const doc=await PDFLib.PDFDocument.load(bytes);
-      const font=await doc.embedFont(PDFLib.StandardFonts.HelveticaBold);
+      const doc=await PDFLib.PDFDocument.load(toU8(bytes), {ignoreEncryption:true});
       const pages=doc.getPages();
       pages.forEach((page,i)=>{
         pg.update(20+Math.round(((i+1)/pages.length)*70), `Halaman ${i+1}/${pages.length}...`);
@@ -1301,8 +1306,8 @@ function toolInfo() {
     area.innerHTML='<p style="color:var(--muted);font-size:.85rem">Membaca metadata...</p>';
     try {
       const bytes=await readFileBytes(files[0]);
-      const doc=await PDFLib.PDFDocument.load(bytes,{ignoreEncryption:true});
-      const pdfjsDoc=await pdfjsLib.getDocument(bytes).promise;
+      const doc=await PDFLib.PDFDocument.load(toU8(bytes),{ignoreEncryption:true});
+      const pdfjsDoc=await pdfjsLib.getDocument({data: toU8(bytes)}).promise;
       const meta=pdfjsDoc.loadingTask;
       const rows=[
         ['📄 Nama file', files[0].name],
