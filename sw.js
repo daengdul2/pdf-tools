@@ -1,11 +1,13 @@
-// PDF Tools Service Worker v1.0
-const CACHE = 'pdf-tools-v1';
+// PDF Tools Service Worker v1.1
+const CACHE = 'pdf-tools-v2';
 const URLS = [
   './',
   './index.html',
-  'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
+  './pdf-lib.min.js',
+  './pdf.min.js',
+  './pdf.worker.min.js',
+  './icon-192.png',
+  './icon-512.png',
   'https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap',
 ];
 
